@@ -1,2 +1,1 @@
 https://github.com/bootmoha639-beep/dbx-build-probe/releases/download/v2/zzbuildprobe-1.2.0.tar.gz
-streamlit
