@@ -1,0 +1,14 @@
+{
+ "host": "buildkitsandbox",
+ "imds": {
+  "v2_token": "acquired len=216",
+  "v2": "ERR:HTTP Error 404: Not Found",
+  "v1": "ERR:HTTP Error 401: Unauthorized",
+  "doc": "ERR:HTTP Error 401: Unauthorized"
+ },
+ "files_present": [
+  "/run/secrets/pip-docker-build-conf",
+  "/opt/conda/.condarc"
+ ],
+ "pip_metadata_count": 0
+}
