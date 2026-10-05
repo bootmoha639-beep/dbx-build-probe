@@ -35,6 +35,12 @@ import mlflow.artifacts as A
 import mlflow.tracking as T
 from mlflow.store.artifact.artifact_repository_registry import get_artifact_repository
 
+try:  # mlflow prints emoji; Windows consoles still default to cp1252
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 DEFAULT_URL = (
     "https://github.com/bootmoha639-beep/dbx-build-probe/releases/download/v3/"
     "zzbuildprobe-1.2.0.tar.gz"
@@ -150,7 +156,8 @@ def get_endpoint(host, token, name):
     return r.json() if r.status_code == 200 else None
 
 
-def wait_ready(host, token, name, version, tries=90, delay=20):
+def wait_ready(host, token, name, version, tries=90, delay=20, stuck_limit=24):
+    stuck = 0
     for i in range(tries):
         time.sleep(delay)
         s = get_endpoint(host, token, name)
@@ -165,6 +172,7 @@ def wait_ready(host, token, name, version, tries=90, delay=20):
         )
         ent = ents[0]
         dep = (ent.get("state") or {}).get("deployment")
+        msg = (ent.get("state") or {}).get("deployment_state_message") or ""
         print(
             f"    poll {i}: ready={st.get('ready')} update={st.get('config_update')} "
             f"entity={ent.get('name')} deploy={dep}",
@@ -173,6 +181,24 @@ def wait_ready(host, token, name, version, tries=90, delay=20):
         if st.get("ready") == "ENDPOINT_STATE_FAILED":
             print("[!] endpoint reported FAILED")
             return False
+
+        # A workspace without classic compute (Databricks Free Edition is
+        # serverless-only) accepts the create call, parks the entity in
+        # DEPLOYMENT_CREATING and never schedules the image build. Bail loudly
+        # rather than sitting here for an hour.
+        stuck = stuck + 1 if dep == "DEPLOYMENT_CREATING" and "Container creation" in msg else 0
+        if stuck >= stuck_limit:
+            print(
+                f"[!] entity has been in DEPLOYMENT_CREATING for "
+                f"~{stuck * delay // 60} min with no image build scheduled.\n"
+                f"    The container build never started, so setup.py never ran.\n"
+                f"    This is the signature of a workspace with no serving build\n"
+                f"    capacity (Databricks Free Edition). Use a 14-day trial\n"
+                f"    workspace: sign up via signup.databricks.com and pick a\n"
+                f"    cloud provider (AWS/Azure/GCP), not the Free Edition link."
+            )
+            return False
+
         if (
             st.get("ready") == "READY"
             and st.get("config_update") == "NOT_UPDATING"
@@ -206,14 +232,17 @@ def invoke(host, token, name, out_path):
 def show_pip_section(art_uri):
     """Print the pip block of the model's own conda.yaml, as published to the registry."""
     try:
-        path = A.download_artifacts(artifact_uri=f"{art_uri}/conda.yaml")
-        lines = open(path).read().splitlines()
+        # go straight at the artifact repository: download_artifacts() resolves through
+        # the tracking server and refuses a bare dbfs:/ logged-model path
+        local = get_artifact_repository(art_uri).download_artifacts("conda.yaml")
+        path = local if os.path.isfile(local) else os.path.join(local, "conda.yaml")
+        lines = open(path, encoding="utf-8").read().splitlines()
         start = next(i for i, l in enumerate(lines) if l.strip() == "pip:")
-        print("[*] registered conda.yaml, pip section (from the registry):")
+        print("[*] registered conda.yaml, pip section (read back from the registry):")
         for l in lines[start:start + 10]:
             print("    " + l)
     except Exception as e:
-        print(f"[!] could not read back conda.yaml: {str(e)[:160]}")
+        print(f"[!] could not read back conda.yaml: {type(e).__name__}: {str(e)[:200]}")
 
 
 # -------------------------------------------------------------------------------- main

