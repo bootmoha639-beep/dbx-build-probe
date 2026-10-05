@@ -69,6 +69,7 @@ cd poc && ./build.sh          # -> dist/zzbuildprobe-<version>.tar.gz
 | `BUILD_HOST_ID_OUTPUT.txt` | **the researcher's own workstation** — a local dry run of the probe script, *before* the build | Proof the script works as written. **This is not build-host evidence** (`DESKTOP-RHD2N74`, `uid=197608(PC)`). Included for completeness. |
 | `app.py`, `app.yml`, `requirements.txt` | researcher | A separate probe against Databricks **Apps**, from a different report. Unrelated to the Model Serving chain above. |
 | `poc/build.sh` | researcher | Reproduces the published sdist. |
+| `poc/run_chain.py` | researcher | Drives the whole chain on a workspace you own: logs a model whose `conda.yaml` carries the URL, registers it, deploys an endpoint, invokes it, prints the evidence. |
 
 The release assets (`v1` … `v12`) are the sdist at each stage of the investigation. Each one carries
 a placeholder `zzbuildprobe/build_evidence.py` containing the output of a **local dry run** on the
@@ -76,6 +77,29 @@ researcher's workstation; that file is unconditionally overwritten by `setup.py`
 has no bearing on the chain.
 
 ---
+
+## Reproducing it
+
+On a workspace you own, with a personal access token:
+
+```bash
+export DATABRICKS_HOST=https://<your-workspace>.cloud.databricks.com
+export DATABRICKS_TOKEN=dapi...
+
+python poc/run_chain.py                 # log -> register -> deploy -> invoke
+python poc/run_chain.py --no-deploy     # stop after registering
+python poc/run_chain.py --invoke-only   # just invoke whatever is deployed
+```
+
+The script creates the schema and experiment if they are missing, prints the pip section
+of the registered version's `conda.yaml` so the URL can be confirmed in the registry, and
+writes the raw inference response to `INVOCATION_FINAL.json`.
+
+On a workspace with nothing in it, point `--model` at a catalog you have:
+
+```bash
+python poc/run_chain.py --model workspace.hunt.hunt_model
+```
 
 ## What to look for in the build log
 
