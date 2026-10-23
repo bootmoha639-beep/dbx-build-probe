@@ -1,0 +1,8 @@
+command:
+- gunicorn
+- app:app
+- -b
+- 0.0.0.0:8000
+env:
+- name: DATABRICKS_APP_VERSION
+  value: '1'
